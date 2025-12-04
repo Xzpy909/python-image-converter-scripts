@@ -6,10 +6,10 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QGroupBox, 
                              QSlider, QComboBox, QCheckBox, QListWidget, 
                              QProgressBar, QFileDialog, QMessageBox, QAbstractItemView,
-                             QDoubleSpinBox, QSpinBox) # Added SpinBoxes for JXL params
+                             QDoubleSpinBox, QSpinBox, QInputDialog)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 
-# Logic adapted from original ConversionWorker [cite: 2]
+# Logic adapted from original ConversionWorker
 class ConversionWorker(QThread):
     """
     Worker thread to handle the file conversion process without freezing the UI.
@@ -27,10 +27,10 @@ class ConversionWorker(QThread):
 
     def run(self):
         total = len(self.files)
-        cjxl = self.settings['cjxl_path'] # Renamed from heifenc_path
+        cjxl = self.settings['cjxl_path']
         exiftool = self.settings['exiftool_path']
         
-        # Windows specific flag to hide the console window [cite: 3, 4]
+        # Windows specific flag to hide the console window
         startup_info = None
         creation_flags = 0
         if os.name == 'nt':
@@ -44,26 +44,28 @@ class ConversionWorker(QThread):
             self.status_update.emit(f"Processing {i+1}/{total}: {filename}")
             
             base_name = os.path.splitext(input_path)[0]
-            output_path = base_name + ".jxl" # Changed to .jxl extension [cite: 5]
+            output_path = base_name + ".jxl"
 
             # --- Build cjxl Command ---
             # Usage: cjxl.exe INPUT OUTPUT [OPTIONS...]
             cmd = [cjxl, input_path, output_path]
 
+            is_jpeg = input_path.lower().endswith(('.jpg', '.jpeg'))
+            want_lossy = self.settings['distance'] > 0
+            
+            if is_jpeg and want_lossy:
+                cmd += ["-j", "0"]
+
             # 1. Distance (-d)
-            # 0.0 = mathematically lossless, 1.0 = visually lossless
             cmd += ["-d", str(self.settings['distance'])]
 
             # 2. Effort (-e)
-            # Range: 1 .. 10
             cmd += ["-e", str(self.settings['effort'])]
 
             # 3. Brotli Effort
-            # Range: 0 .. 11
             cmd += ["--brotli_effort", str(self.settings['brotli_effort'])]
 
             # 4. Photon Noise ISO
-            # Only add if greater than 0
             if self.settings['photon_noise_iso'] > 0:
                 cmd += ["--photon_noise_iso", str(self.settings['photon_noise_iso'])]
 
@@ -71,7 +73,7 @@ class ConversionWorker(QThread):
             cmd += ["--quiet"]
 
             try:
-                # Run cjxl silently [cite: 7, 8]
+                # Run cjxl silently
                 subprocess.run(
                     cmd, 
                     check=True, 
@@ -80,7 +82,7 @@ class ConversionWorker(QThread):
                     creationflags=creation_flags
                 )
 
-                # Optional: Copy metadata with ExifTool silently [cite: 9]
+                # Optional: Copy metadata with ExifTool silently
                 if exiftool and os.path.isfile(exiftool):
                     exif_cmd = [
                         exiftool, "-m", "-overwrite_original",
@@ -99,7 +101,7 @@ class ConversionWorker(QThread):
             except Exception as e:
                 self.error_signal.emit(f"System Error on {filename}:\n{str(e)}")
 
-            # Update Progress [cite: 13]
+            # Update Progress
             progress_percent = int((i + 1) / total * 100)
             self.progress_update.emit(progress_percent)
 
@@ -113,10 +115,10 @@ class JXLConverterApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("JXL Converter (cjxl) - Drag & Drop Support")
-        self.resize(650, 750)
+        self.resize(650, 800)
         self.accept_drops = True
         
-        self.config_file = "jxl_settings.ini" # Updated config name
+        self.config_file = "jxl_settings.ini"
         self.config = configparser.ConfigParser()
         self.worker = None
 
@@ -126,6 +128,28 @@ class JXLConverterApp(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout()
         self.setLayout(main_layout)
+
+        # --- Section 0: Presets ---
+        preset_group = QGroupBox("Presets")
+        preset_layout = QHBoxLayout()
+        
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("Select a preset...")
+        self.preset_combo.currentIndexChanged.connect(self.load_preset_from_combo)
+        
+        btn_save_preset = QPushButton("Save Current Settings")
+        btn_save_preset.clicked.connect(self.save_preset_dialog)
+
+        btn_del_preset = QPushButton("Delete Preset")
+        btn_del_preset.clicked.connect(self.delete_preset)
+
+        preset_layout.addWidget(QLabel("Load Preset:"))
+        preset_layout.addWidget(self.preset_combo, 1) # Stretch factor 1
+        preset_layout.addWidget(btn_save_preset)
+        preset_layout.addWidget(btn_del_preset)
+        
+        preset_group.setLayout(preset_layout)
+        main_layout.addWidget(preset_group)
 
         # --- Section 1: Tool Paths ---
         paths_group = QGroupBox("Tool Paths")
@@ -141,7 +165,7 @@ class JXLConverterApp(QWidget):
         h_layout.addWidget(btn_browse_jxl)
         paths_layout.addLayout(h_layout)
 
-        # exiftool path [cite: 16]
+        # exiftool path
         e_layout = QHBoxLayout()
         e_layout.addWidget(QLabel("ExifTool:"))
         self.exiftool_input = QLineEdit()
@@ -167,11 +191,10 @@ class JXLConverterApp(QWidget):
         self.dist_spin = QDoubleSpinBox()
         self.dist_spin.setRange(0.0, 25.0)
         self.dist_spin.setSingleStep(0.1)
-        self.dist_spin.setValue(1.0) # Default for lossy
+        self.dist_spin.setValue(1.0) # Default
         self.dist_spin.setDecimals(2)
         dist_layout.addWidget(self.dist_spin)
         
-        # Helper text for distance
         self.dist_info = QLabel("(1.0 = Visually Lossless)")
         self.dist_spin.valueChanged.connect(self.update_dist_label)
         dist_layout.addWidget(self.dist_info)
@@ -182,8 +205,8 @@ class JXLConverterApp(QWidget):
         eff_layout.addWidget(QLabel("Effort (-e):"))
         
         self.effort_slider = QSlider(Qt.Orientation.Horizontal)
-        self.effort_slider.setRange(1, 10) # Range 1-10
-        self.effort_slider.setValue(7)     # Default 7
+        self.effort_slider.setRange(1, 10)
+        self.effort_slider.setValue(7)
         
         self.effort_label = QLabel("7")
         self.effort_slider.valueChanged.connect(lambda v: self.effort_label.setText(str(v)))
@@ -197,8 +220,8 @@ class JXLConverterApp(QWidget):
         brotli_layout.addWidget(QLabel("Brotli Effort:"))
         
         self.brotli_slider = QSlider(Qt.Orientation.Horizontal)
-        self.brotli_slider.setRange(0, 11) # Range 0-11
-        self.brotli_slider.setValue(9)     # Default 9
+        self.brotli_slider.setRange(0, 11)
+        self.brotli_slider.setValue(9)
         
         self.brotli_label = QLabel("9")
         self.brotli_slider.valueChanged.connect(lambda v: self.brotli_label.setText(str(v)))
@@ -216,7 +239,7 @@ class JXLConverterApp(QWidget):
         self.iso_spin = QSpinBox()
         self.iso_spin.setRange(0, 51200)
         self.iso_spin.setSingleStep(100)
-        self.iso_spin.setValue(0) # Default 0
+        self.iso_spin.setValue(0)
         iso_layout.addWidget(self.iso_spin)
         
         params_layout.addLayout(iso_layout)
@@ -224,7 +247,7 @@ class JXLConverterApp(QWidget):
         params_group.setLayout(params_layout)
         main_layout.addWidget(params_group)
 
-        # --- Section 3: File List (Drag & Drop) [cite: 21, 22] ---
+        # --- Section 3: File List ---
         files_group = QGroupBox("Input Images (Drag & Drop files here)")
         files_layout = QVBoxLayout()
 
@@ -242,8 +265,6 @@ class JXLConverterApp(QWidget):
         self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_list.setAcceptDrops(True)
         self.file_list.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
-        
-        # Enable Drag and Drop Events on the ListWidget
         self.file_list.dragEnterEvent = self.dragEnterEvent
         self.file_list.dragMoveEvent = self.dragMoveEvent
         self.file_list.dropEvent = self.dropEvent
@@ -257,7 +278,6 @@ class JXLConverterApp(QWidget):
         
         self.btn_convert = QPushButton("START JXL CONVERSION")
         self.btn_convert.setMinimumHeight(50)
-        # Changed color to specific JXL blue/teal style preference or keep generic
         self.btn_convert.setStyleSheet("background-color: #00796b; color: white; font-weight: bold; font-size: 14px;")
         self.btn_convert.clicked.connect(self.start_conversion)
         action_layout.addWidget(self.btn_convert)
@@ -280,22 +300,143 @@ class JXLConverterApp(QWidget):
         else:
             self.dist_info.setText("")
 
-    # --- Config Methods ---
+    # --- Config & Presets Methods ---
+    def get_current_settings_dict(self):
+        """Returns a dict of the current UI values."""
+        return {
+            "distance": str(self.dist_spin.value()),
+            "effort": str(self.effort_slider.value()),
+            "brotli_effort": str(self.brotli_slider.value()),
+            "photon_noise_iso": str(self.iso_spin.value())
+        }
+
+    def apply_settings_dict(self, settings):
+        """Applies a dict of settings to the UI."""
+        if not settings:
+            return
+        
+        try:
+            if "distance" in settings:
+                self.dist_spin.setValue(float(settings["distance"]))
+            if "effort" in settings:
+                self.effort_slider.setValue(int(settings["effort"]))
+            if "brotli_effort" in settings:
+                self.brotli_slider.setValue(int(settings["brotli_effort"]))
+            if "photon_noise_iso" in settings:
+                self.iso_spin.setValue(int(settings["photon_noise_iso"]))
+        except ValueError:
+            pass # Ignore parsing errors
+
     def load_config(self):
-        if os.path.exists(self.config_file):
-            self.config.read(self.config_file)
-            if "PATHS" in self.config:
-                # Load cjxl path instead of heifenc
-                self.cjxl_input.setText(self.config["PATHS"].get("cjxl", ""))
-                self.exiftool_input.setText(self.config["PATHS"].get("exiftool", ""))
+        """Loads paths, current state, and populates presets."""
+        if not os.path.exists(self.config_file):
+            return
+
+        self.config.read(self.config_file)
+        
+        # 1. Load Paths
+        if "PATHS" in self.config:
+            self.cjxl_input.setText(self.config["PATHS"].get("cjxl", ""))
+            self.exiftool_input.setText(self.config["PATHS"].get("exiftool", ""))
+
+        # 2. Load Last Used GUI State (Auto-Restore)
+        if "GUI_STATE" in self.config:
+            self.apply_settings_dict(self.config["GUI_STATE"])
+
+        # 3. Populate Preset List
+        self.refresh_preset_combo()
 
     def save_config(self):
-        self.config["PATHS"] = {
-            "cjxl": self.cjxl_input.text(),
-            "exiftool": self.exiftool_input.text()
-        }
+        """Saves paths and current GUI state to config file."""
+        # Ensure sections exist
+        if "PATHS" not in self.config:
+            self.config["PATHS"] = {}
+        if "GUI_STATE" not in self.config:
+            self.config["GUI_STATE"] = {}
+
+        # Save Paths
+        self.config["PATHS"]["cjxl"] = self.cjxl_input.text()
+        self.config["PATHS"]["exiftool"] = self.exiftool_input.text()
+
+        # Save Current State (Auto-Save)
+        current_settings = self.get_current_settings_dict()
+        for key, val in current_settings.items():
+            self.config["GUI_STATE"][key] = val
+
         with open(self.config_file, "w") as f:
             self.config.write(f)
+
+    def closeEvent(self, event):
+        """Override close event to save settings automatically."""
+        self.save_config()
+        event.accept()
+
+    # --- Preset Logic ---
+    def refresh_preset_combo(self):
+        """Refreshes the combobox items based on config sections starting with PRESET:"""
+        current_text = self.preset_combo.currentText()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("Select a preset...")
+        
+        for section in self.config.sections():
+            if section.startswith("PRESET:"):
+                preset_name = section.split("PRESET:", 1)[1]
+                self.preset_combo.addItem(preset_name)
+        
+        # Restore selection if it still exists
+        index = self.preset_combo.findText(current_text)
+        if index != -1:
+            self.preset_combo.setCurrentIndex(index)
+        
+        self.preset_combo.blockSignals(False)
+
+    def save_preset_dialog(self):
+        text, ok = QInputDialog.getText(self, "Save Preset", "Enter preset name:")
+        if ok and text:
+            section_name = f"PRESET:{text}"
+            if section_name not in self.config:
+                self.config[section_name] = {}
+            
+            # Save current settings to this preset section
+            current_settings = self.get_current_settings_dict()
+            for key, val in current_settings.items():
+                self.config[section_name][key] = val
+            
+            with open(self.config_file, "w") as f:
+                self.config.write(f)
+            
+            self.refresh_preset_combo()
+            # Select the newly created preset
+            index = self.preset_combo.findText(text)
+            if index != -1:
+                self.preset_combo.setCurrentIndex(index)
+            
+            QMessageBox.information(self, "Preset Saved", f"Preset '{text}' saved successfully.")
+
+    def load_preset_from_combo(self):
+        preset_name = self.preset_combo.currentText()
+        section_name = f"PRESET:{preset_name}"
+        
+        if section_name in self.config:
+            self.apply_settings_dict(self.config[section_name])
+
+    def delete_preset(self):
+        preset_name = self.preset_combo.currentText()
+        section_name = f"PRESET:{preset_name}"
+        
+        if section_name in self.config:
+            confirm = QMessageBox.question(self, "Confirm Delete", 
+                                           f"Are you sure you want to delete preset '{preset_name}'?",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.config.remove_section(section_name)
+                with open(self.config_file, "w") as f:
+                    self.config.write(f)
+                self.refresh_preset_combo()
+                self.preset_combo.setCurrentIndex(0) # Reset to default
+        else:
+            QMessageBox.warning(self, "Error", "Please select a valid preset to delete.")
 
     # --- File Handling ---
     def browse_file(self, line_edit):
@@ -318,7 +459,7 @@ class JXLConverterApp(QWidget):
     def clear_files(self):
         self.file_list.clear()
 
-    # --- Drag and Drop Events [cite: 29, 30] ---
+    # --- Drag and Drop Events ---
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.accept()
@@ -336,7 +477,6 @@ class JXLConverterApp(QWidget):
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
             if os.path.isfile(file_path):
-                # Extended for JXL input support
                 if file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.heic', '.gif', '.ppm', '.apng')):
                     files.append(file_path)
         
@@ -371,7 +511,7 @@ class JXLConverterApp(QWidget):
         self.progress_bar.setValue(0)
         self.file_list.setEnabled(False)
 
-        # Start Thread [cite: 34]
+        # Start Thread
         self.worker = ConversionWorker(files, settings)
         self.worker.progress_update.connect(self.progress_bar.setValue)
         self.worker.status_update.connect(self.status_label.setText)
